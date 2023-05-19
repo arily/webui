@@ -104,14 +104,35 @@
 
 <script lang="ts" setup>
 
-import { Directive, ref, computed, watch, onActivated, nextTick } from 'vue'
+import { Directive, ref, computed, watch, onActivated, nextTick, shallowRef, onBeforeMount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDark, useElementSize, useEventListener } from '@vueuse/core'
 import { send, store, base64ToArrayBuffer, arrayBufferToBase64 } from '@koishijs/client'
 import { Entry } from '../src'
 import { files } from './store'
 import { model } from './editor'
-import * as monaco from 'monaco-editor'
+import type * as Monaco from 'monaco-editor'
+
+const getMonaco = () => import('monaco-editor').then(m => m as typeof m['default'])
+const monaco = shallowRef<Awaited<ReturnType<typeof getMonaco>> | undefined>()
+let instance: Monaco.editor.IStandaloneCodeEditor = null
+
+onBeforeMount(() => {
+  getMonaco()
+    .then(module => {
+      console.log(module)
+      monaco.value = module
+    })
+})
+
+onMounted(() => {
+  // cached
+  nextTick(() => getMonaco()
+    .then(refreshEditor)
+    .then(() => refreshFile(files[active.value]))
+  )
+})
+
 
 const vFocus: Directive = {
   mounted: (el) => el.focus()
@@ -127,7 +148,7 @@ const keyword = ref('')
 const tree = ref(null)
 const menu = ref(null)
 const root = ref<{ $el: HTMLElement }>(null)
-const editor = ref(null)
+const editor = ref<HTMLDivElement>(null)
 const menuTarget = ref<TreeEntry>(null)
 const renaming = ref<string>(null)
 const data = ref<TreeEntry[]>([])
@@ -164,6 +185,33 @@ function merge(base: TreeEntry[], head: Entry[]) {
   })
 }
 
+function refreshEditor() {
+  if (!editor.value) {
+    instance = null
+    return
+  }
+  console.log(monaco)
+  instance = monaco.value?.editor.create(editor.value, {
+    model,
+    theme: isDark.value ? 'vs-dark' : 'vs-light',
+    tabSize: 2,
+  })
+}
+
+async function refreshFile(entry: Entry) {
+
+  if (entry?.type !== 'file') return
+  if (typeof entry.oldValue !== 'string') {
+    entry.oldValue = entry.newValue = await send('explorer/read', entry.filename)
+  }
+  model.setValue(entry.newValue)
+  monaco.value?.editor.setModelLanguage(model, getLanguage(entry.filename))
+}
+
+function safeIterator<T>(i?: Iterable<T>) {
+  return i?.[Symbol.iterator] && i || []
+}
+
 watch(() => store.explorer, (value) => {
   data.value = merge(data.value, value) || []
 }, { immediate: true })
@@ -176,7 +224,6 @@ useEventListener('contextmenu', () => {
   menuTarget.value = null
 })
 
-let instance: monaco.editor.IStandaloneCodeEditor = null
 
 watch(keyword, (val) => {
   tree.value.filter(val)
@@ -184,14 +231,7 @@ watch(keyword, (val) => {
 
 const isDark = useDark()
 
-watch(editor, () => {
-  if (!editor.value) return instance = null
-  instance = monaco.editor.create(editor.value, {
-    model,
-    theme: isDark.value ? 'vs-dark' : 'vs-light',
-    tabSize: 2,
-  })
-})
+watch(editor, refreshEditor)
 
 const { width, height } = useElementSize(editor)
 
@@ -200,7 +240,7 @@ watch([width, height], () => {
 })
 
 watch(isDark, () => {
-  monaco.editor.setTheme(isDark.value ? 'vs-dark' : 'vs-light')
+  monaco.value?.editor.setTheme(isDark.value ? 'vs-dark' : 'vs-light')
 })
 
 const active = computed<string>({
@@ -304,20 +344,13 @@ function allowDrop(source: Node, target: Node, type: 'inner' | 'prev' | 'next') 
 function getLanguage(filename: string) {
   const index = filename.lastIndexOf('.')
   const extension = index === -1 ? '' : filename.slice(index)
-  for (const language of monaco.languages.getLanguages()) {
+  for (const language of safeIterator(monaco.value?.languages.getLanguages())) {
     if (language.extensions?.includes(extension)) return language.id
   }
   return 'plaintext'
 }
 
-watch(() => files[active.value], async (entry) => {
-  if (entry?.type !== 'file') return
-  if (typeof entry.oldValue !== 'string') {
-    entry.oldValue = entry.newValue = await send('explorer/read', entry.filename)
-  }
-  model.setValue(entry.newValue)
-  monaco.editor.setModelLanguage(model, getLanguage(entry.filename))
-}, { immediate: true })
+watch(() => files[active.value], refreshFile, { immediate: true })
 
 model.onDidChangeContent((e) => {
   const entry = files[active.value]
@@ -412,7 +445,6 @@ useEventListener('dragover', (event: DragEvent) => {
 </script>
 
 <style lang="scss" scoped>
-
 .editor {
   height: 100%;
   width: 100%;
@@ -471,5 +503,4 @@ useEventListener('dragover', (event: DragEvent) => {
     }
   }
 }
-
 </style>
